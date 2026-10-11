@@ -1,27 +1,34 @@
 # -*- coding: utf-8 -*-
-"""把本 skill 的内容做成一张《门诊早矫管理指标地图》Excel。
+"""生成《门诊早矫管理指标地图》Excel。
 
 版式参照用户的《门诊经营指标诊断.xlsx》：
-  标题行合并居中 → 三列分组（指标 / 行业参考标准 / 指标定义说明）→ 分组色块 → 全表细边框。
-数据全部来自本仓库的题库、红线判据、动作与指标定义，不新增口径。
+  标题行合并居中 → 三栏分组 → 分组色块 → 全表细边框。
+
+结构（5 张表）：
+  指标地图总览 + A/B/C/D 四张维度表（每题一行：题干 / 选项 / 判分锚点 / 可填选项号并自动算分）
+  表名带维度名，如「A-1 标准与分级」。
+
+行高由内容算出来（见 calc_row_height），不靠 Excel 自动撑行 —— 程序生成的工作簿里
+自动行高往往不生效，wrap_text 的长文本会被裁掉。
 
 用法：
     python build_metrics_workbook.py <输出.xlsx>
-
-说明：本脚本只写文件，不做任何网络与文件系统之外的副作用；重复运行结果一致。
 """
 from __future__ import annotations
 
+import math
 import sys
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 # --------------------------------------------------------------------------- #
-# 样式（对齐参照表的做法：等线 10pt、细边框、分组色块）
+# 样式
 # --------------------------------------------------------------------------- #
 FONT = "等线"
-TITLE_FONT = Font(name=FONT, size=12, bold=True, color="FF000000")
+TITLE_FONT = Font(name=FONT, size=13, bold=True, color="FF000000")
 HEAD_FONT = Font(name=FONT, size=10, bold=True, color="FF000000")
 BODY_FONT = Font(name=FONT, size=10, color="FF000000")
 KEY_FONT = Font(name=FONT, size=10, bold=True, color="FF000000")
@@ -29,27 +36,32 @@ KEY_FONT = Font(name=FONT, size=10, bold=True, color="FF000000")
 THIN = Side(style="thin", color="FFBFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
+WRAP = Alignment(vertical="center", wrap_text=True)
+WRAP_TOP = Alignment(vertical="top", wrap_text=True)
 CENTER = Alignment(horizontal="center", vertical="center")
-VALIGN = Alignment(vertical="center")
-VALIGN_WRAP = Alignment(vertical="center", wrap_text=True)
-HEAD_ALIGN = Alignment(vertical="center", wrap_text=True)
+CENTER_WRAP = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-#: 分组色块：维度 A/B/C/D 各一色，与参照表的「浅蓝 / 浅绿 / 浅红 / 浅橙」同调
 FILL_A = PatternFill("solid", start_color="FFE5F6FF")
 FILL_B = PatternFill("solid", start_color="FFEAFAF1")
 FILL_C = PatternFill("solid", start_color="FFFFE9E8")
 FILL_D = PatternFill("solid", start_color="FFFFF3EB")
 FILL_NEUTRAL = PatternFill("solid", start_color="FFFFF9E3")
 FILL_HEAD = PatternFill("solid", start_color="FFF2F2F2")
-FILL_ANSWER = PatternFill("solid", start_color="FFFFFDF0")
+FILL_INPUT = PatternFill("solid", start_color="FFFFFDF0")
 FILL_TOTAL = PatternFill("solid", start_color="FFEDEDED")
 
 DIM_FILL = {"A": FILL_A, "B": FILL_B, "C": FILL_C, "D": FILL_D}
+DIM_TITLE = {
+    "A": "A-1 标准与分级",
+    "B": "A-2 方案审核与结案",
+    "C": "A-3 记录与过程数据",
+    "D": "A-4 财务与激励",
+}
 DIM_NAME = {
-    "A": "A · 标准与分级",
-    "B": "B · 方案审核与结案",
-    "C": "C · 记录与过程数据",
-    "D": "D · 财务与激励",
+    "A": "标准与分级",
+    "B": "方案审核与结案",
+    "C": "记录与过程数据",
+    "D": "财务与激励",
 }
 DIM_WHAT = {
     "A": "管「你有没有标准」",
@@ -57,6 +69,35 @@ DIM_WHAT = {
     "C": "管「看不看得见」",
     "D": "管「账明不明白」",
 }
+
+#: 行高计算用的常量
+LINE_PT = 14.0      # 10pt 等线一行的行高
+CLIP_PT = 8.0       # 上下内边距
+MIN_ROW_PT = 22.0   # 单行最小行高
+BLANK_ROW_PT = 8.0  # 分组空行
+
+
+def calc_row_height(values: list, widths: list[float], extra_lines: int = 0) -> float:
+    """按内容估算行高（磅）。
+
+    Excel 不提供"先量文字再定高"，程序生成时必须自己算，否则 wrap_text 的内容会被裁。
+
+    估算方式：每列按「字符数 ÷ 列宽」估行数；中文字符约占 1.0 个列宽单位，
+    英文与数字约占 0.55，所以按 1.0 保守估（宁高不矮）。已有换行符的按段分别估。
+    """
+    lines = 1
+    for text, width in zip(values, widths):
+        if text is None:
+            continue
+        s = str(text)
+        w = max(float(width), 4.0)
+        n = 0
+        for part in s.split("\n"):
+            n += max(1, math.ceil(len(part) / (w * 1.0)))
+        lines = max(lines, n)
+    lines += extra_lines
+    return max(MIN_ROW_PT, lines * LINE_PT + CLIP_PT)
+
 
 # --------------------------------------------------------------------------- #
 # 题库：题号 / 题干 / 五个选项 / 判分锚点
@@ -71,30 +112,28 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
       "只有一个数拿得到，另一个查不到",
       "两个都说不清，要靠问医生、翻本子",
       "不知道 / 没想过"],
-     "两个子问分开看。3 分=两个数随时可调、能按医生门店下钻；2 分=都能查出但要临时统计；"
-     "1 分=只有一个数拿得到；0 分=两个都说不清。判 0 或 1 分 → 红线 R1 命中。"),
+     "两个子问分开看。判 0 或 1 分 → 红线 R1 命中。"),
     ("A2", "你们对早矫有明确的结束周期标准吗？比如一个病例计划多久结束、平均延期几个月算正常？",
      ["有分类型的周期标准，延期被持续统计，并进入医生反馈与排程",
       "有书面周期标准，也统计过平均延期，但没和医生考核或排程挂钩",
       "口头上有大概印象，但没有写下来，也没算过延期",
       "没有周期标准，也从未算过延期情况",
       "不知道 / 没想过"],
-     "追问：「平均延期几个月」是算出来的还是估的。判 0 或 1 分、且答完 A2 仍给不出可核延期数字 → 红线 R2 命中。"
-     "答完 A2 就判，不必等后面的题；后来 B5 若给出可核数字，回来改判未命中。"),
+     "追问：「平均延期几个月」是算出来的还是估的。判 0 或 1 分且拿不出可核延期数字 → 红线 R2 命中。"),
     ("A3", "什么样的孩子该做早矫、什么样的不该做、每次复诊要做什么、做到什么程度算结束——这些有没有写成文字？谁定的？谁在最终拍板？",
      ["标准成文、有版本、有明确的审核与更新机制，拍板人和依据都能说清",
       "有相对完整的成文标准，但审核、更新与拍板仍主要靠个别资深医生的经验",
       "有零散的内部共识或口头规矩，但没有成文文件",
       "没有成文标准，各医生各按自己师承的路子做，拍板就是经治医生本人",
       "不知道 / 没想过"],
-     "看两件事：标准是否存在（有没有成文）、权威归属（体系还是个人）。3 分=成文且有版本与审核更新机制。"),
+     "看两件事：标准是否存在（有没有成文）、权威归属（体系还是个人）。"),
     ("A4", "你们的病例有做难度分级吗？哪个级别对应哪个医生接手，有没有明文规定？",
      ["分级标准成文，明确「什么级别的医生接什么难度的病例」，并实际用于接诊分配",
       "有难度分类或分级表，但接诊分配仍按资历、排班或业绩临时决定",
       "医生心里大概有数，但没写下来，接诊主要看谁有空",
       "没有难度分级，来什么接什么",
       "不知道 / 没想过"],
-     "难度分级是「方案要审」的前提——不分级，就没有理由拒绝接某个病例。看「有没有表」更要看「实际用不用」。"),
+     "难度分级是「方案要审」的前提 —— 不分级，就没有理由拒绝接某个病例。看「有没有表」更要看「实际用不用」。"),
     ("A5", "医生的能力有分级吗？谁有能力独立做哪个级别的早矫病例，这一条是怎么确定的？",
      ["能力分级有客观依据（完成病例数、结束质量、并发症等），定期复评、与接诊权限绑定",
       "有书面能力分级标准，但没有用病例记录、结束质量等客观数据支撑",
@@ -116,7 +155,7 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
       "有口头沟通或非正式招呼，但没有审核记录",
       "没有审核环节，医生定完就直接开始，无记录",
       "不知道 / 没想过"],
-     "关键在「留存」——口头过一下不算体系。"),
+     "关键在「留存」—— 口头过一下不算体系。"),
     ("B2", "方案审核的时候，你们具体看哪几项？诊断依据、治疗目标、计划做多久——这三项在你们的审核表里都有吗？",
      ["审核表固定包含诊断依据、治疗目标、计划结束时长，三项都留有书面结论",
       "三项都有要求，但执行不一致，记录简略",
@@ -130,7 +169,7 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
       "有阶段目标的意识，偶有记录，但没有固定时间间隔要求",
       "完全没有阶段目标，只写最终目标，中途靠医生自己把握",
       "不知道 / 没想过"],
-     "不要等两三年后才看能不能结束，要在方案里就把阶段目标拆出来。这是把「结束管理」提前到过程里的唯一办法。"),
+     "不要等两三年后才看能不能结束，要在方案里就把阶段目标拆出来 —— 这是把「结束管理」提前到过程里的唯一办法。"),
     ("B4", "病例结束时，有没有一个独立的复核环节，对照当初定的目标逐条核对？复核不通过会怎样？",
      ["结束必须书面复核，对照初始方案逐条打勾，不通过则明确继续治疗或整改",
       "有复核动作，但对照的是大体效果，不是当初方案里的逐条目标",
@@ -159,7 +198,7 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
       "有时挂号有时不挂，取决于当班前台或医生习惯，没有明确要求",
       "计划外复诊基本不挂号、不写病历，属于普遍现象",
       "不知道 / 没想过"],
-     "计划外复诊不挂号、不写病历，耗材也没有出入库——这是留痕纪律的破口，也是成本核算与留证的地基。"),
+     "计划外复诊不挂号、不写病历，耗材也没有出入库 —— 这是留痕纪律的破口，也是成本核算与留证的地基。"),
     ("C2", "一次复诊记录里会写哪些内容？托槽掉了来粘、钢丝扎嘴来复查这类计划外的处理，会单独记录吗？",
      ["结构化记录 + 计划外处理单列标识，可直接统计每例的计划外复诊次数",
       "有结构化记录（主诉、处理、下一步），计划外处理能在记录里看出来",
@@ -173,7 +212,7 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
       "能零散查到，但要人工翻记录、逐例算，不是常规报表",
       "报表只有收入和成交，看不到就诊次数与椅位时长",
       "不知道 / 没想过"],
-     "追问：椅位时长是怎么记的（系统自动 / 挂号本有但没录入 / 没有记录）。三个必上报表的数：就诊次数、平均椅位占用时长、重启次数。"),
+     "追问：椅位时长是怎么记的。三个必上报表的数：就诊次数、平均椅位占用时长、重启次数。"),
     ("C4", "重启率、延期月数这两个数，你们有在统计吗？是按月/按季度看，还是从来没人算过？",
      ["两者按周期统计，进入管理复盘，并与医生反馈、方案审核挂钩",
       "有统计，但不是周期性看，或者只用来看个别医生",
@@ -216,7 +255,7 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
       "心里知道欠着服务，但没有量化过，也没有月度对比",
       "只看现金流和营业额，没有未交付服务的概念",
       "不知道 / 没想过"],
-     "预收款的增长和医生的交付能力是否匹配——这一题测管理层有没有把自己当负债方看。"),
+     "预收款的增长和医生的交付能力是否匹配 —— 这一题测管理层有没有把自己当负债方看。"),
     ("D4", "医生的绩效里，有没有和「按期结束、结束质量」挂钩的部分？还是只跟接了多少病例、收了多少钱挂钩？",
      ["绩效明确含按期完成率、结束质量（脱矿率、新发龋率等）与复诊复核结果，权重可观",
       "绩效里有结束质量项，但权重低或指标粗糙（比如只看是否结束）",
@@ -240,36 +279,6 @@ QUESTIONS: list[tuple[str, str, list[str], str]] = [
      "单例收入摊到每一次就诊，拖得越久它越薄。把「延期到底亏不亏」从感觉变成数字。"),
 ]
 
-# --------------------------------------------------------------------------- #
-# 红线 / 动作 / 指标
-# --------------------------------------------------------------------------- #
-REDLINES = [
-    ("R1 底数不清", "在册早矫病例底数看不见", "A1 判 0 或 1 分 → 命中", "先把自家病例的底数摸清楚"),
-    ("R2 无周期标准", "没有量化周期标准，也拿不出延期数据", "A2 判 0 或 1 分，且答完 A2 仍给不出可核延期数字 → 命中", "没有靶子，就谈不上脱靶"),
-    ("R3 结束无人核", "结束无书面复核", "B4 判 0 或 1 分 → 命中（1 分档仍是口头确认）", "结束没人核；结束就是医生一张嘴说了算"),
-    ("R4 提成一次性发", "预收矫正款在收款当月/次月一次性发放全额提成", "D2 判 0 分 → 命中", "钱发完了，病例还没开始"),
-]
-
-ACTIONS = [
-    ("ACT-1", "建标准、分级、看底数", "A1 A2 A3 A4 A5 A6 B1 B2", "P0", "导出在册病例清单，补「计划结束日期」一列；出分级表与审核表；定每医生承接容量"),
-    ("ACT-2", "结果要核", "B4 B5 C4 D4", "P0", "结案状态改成「首次保持器复诊通过」；结束复核表落地；复核结果进绩效"),
-    ("ACT-3", "阶段目标要跟", "B3 B6 C5", "P2", "方案模板加入按时间分解的阶段目标；每次复诊对照并与家长确认"),
-    ("ACT-4", "每次就诊都留痕", "C1 C2 C3 C6", "P2", "挂号台加「早矫复诊」快捷号别；计划外处理单列标识；椅位时长与耗材成本归到病例"),
-    ("ACT-5", "提成按阶段发", "D2 D4", "P1", "提成改分期：收款发一部分、中期发一部分、病例结束且质控合格发尾款"),
-    ("ACT-6", "财务的账要算明白", "D1 D3 D5 D6", "P1", "定收入确认规则；每月对账未交付预收款 vs 产能；做 5 例单例损益卡"),
-]
-
-METRICS = [
-    ("K1", "在册早矫病例数", "A1", "病例管理系统按「在治」状态导出"),
-    ("K2", "超计划时长（延期）病例占比", "A1 / B5", "需先明确终点定义；按统计截止日比对计划结束日期"),
-    ("K3", "计划结束时长 vs 实际结束时长（月）", "A2", "从方案与结案时间字段算，两组数口径不同要分别标注"),
-    ("K4", "平均延期月数", "A2 / B5", "计划结束日期减实际结束（或当前）日期的均值"),
-    ("K5", "计划外复诊率（托槽脱落、钢丝扎嘴等）", "C2 / C3", "需 C2 的记录字段支持，否则记为未知"),
-    ("K6", "平均椅位占用时长、每例就诊次数", "C3", "记录字段支持是前提，缺口部分需现场计时补数据"),
-    ("K7", "重启率 / 二次治疗率", "C4", "需在系统里给重启病例打标识"),
-    ("K8", "单例就诊次单价（收入 ÷ 就诊次数）", "D6（分母来自 C3）", "收入侧可算；成本侧需椅位时长与病例级材料成本"),
-]
-
 LEVELS = [
     ("L1", "无标准", "0–30", "没有标准、没有计划时长、没有账，全凭医生个人"),
     ("L2", "刚起步", "31–55", "有零散做法，但不留痕、不可复算"),
@@ -280,271 +289,146 @@ LEVELS = [
 # --------------------------------------------------------------------------- #
 # 写表工具
 # --------------------------------------------------------------------------- #
-HEADERS = ["指标 / 题号", "行业参考标准", "指标定义说明"]
+def put_title(ws, row: int, text: str, last_col: int, width_sum: float) -> None:
+    """合并的标题行。
 
-
-def put_title(ws, row: int, text: str, last_col: int = 3) -> None:
-    """合并的标题行。"""
+    行高要按**合并后的总宽**算，不能只按第一列的宽度 —— 只按第一列算会把
+    一行标题当成要折好几行（实测 8 字符宽的列会把标题估成 36 磅）。
+    """
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_col)
     c = ws.cell(row, 1, text)
     c.font = TITLE_FONT
     c.alignment = CENTER
+    ws.row_dimensions[row].height = calc_row_height([text], [width_sum])
 
 
-def put_header(ws, row: int, headers: list[str]) -> None:
+def put_header(ws, row: int, headers: list[str], widths: list[float]) -> None:
     for i, h in enumerate(headers, start=1):
         c = ws.cell(row, i, h)
         c.font = HEAD_FONT
         c.fill = FILL_HEAD
-        c.alignment = HEAD_ALIGN
+        c.alignment = CENTER_WRAP
         c.border = BORDER
-
-
-def put_row(ws, row: int, values: list, *, fill=None, key_first: bool = True,
-            answer_from: int | None = None, num_fmt_from: int | None = None) -> None:
-    """写一行。values 里的 None 会留空单元格（仍画边框）。"""
-    for i, v in enumerate(values, start=1):
-        c = ws.cell(row, i)
-        if v is not None:
-            c.value = v
-        c.font = KEY_FONT if (key_first and i == 1) else BODY_FONT
-        c.border = BORDER
-        c.alignment = VALIGN_WRAP
-        if fill is not None:
-            c.fill = fill
-        if answer_from is not None and i >= answer_from:
-            c.fill = FILL_ANSWER
+    ws.row_dimensions[row].height = calc_row_height(headers, widths)
 
 
 def set_widths(ws, widths: list[float]) -> None:
     for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[ws.cell(1, i).column_letter].width = w
+        ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def style_blank_row(ws, row: int, cols: int, height: float = 7.5) -> None:
-    """分组之间的空行：只设行高，不画边框。"""
-    ws.row_dimensions[row].height = height
+def write_row(ws, row: int, values: list, widths: list[float], *, fill=None,
+              center_cols: tuple[int, ...] = (), bold_cols: tuple[int, ...] = (),
+              input_cols: tuple[int, ...] = (), min_lines: int = 0) -> None:
+    """写一行并算行高。None 会留空单元格但仍画边框。"""
+    for i, v in enumerate(values, start=1):
+        c = ws.cell(row, i)
+        if v is not None:
+            c.value = v
+        c.font = KEY_FONT if i in bold_cols else BODY_FONT
+        c.border = BORDER
+        c.alignment = CENTER_WRAP if i in center_cols else WRAP
+        if i in input_cols:
+            c.fill = FILL_INPUT
+        elif fill is not None:
+            c.fill = fill
+    ws.row_dimensions[row].height = calc_row_height(values, widths, extra_lines=min_lines)
+
+
+def blank_row(ws, row: int) -> None:
+    ws.row_dimensions[row].height = BLANK_ROW_PT
 
 
 # --------------------------------------------------------------------------- #
-# 各表
+# 指标地图总览
 # --------------------------------------------------------------------------- #
 def sheet_overview(wb: Workbook) -> None:
     ws = wb.create_sheet("指标地图总览")
-    set_widths(ws, [18, 22, 62])
-    put_title(ws, 1, "门诊早矫管理指标地图（IOMI · 早矫体检）", 3)
-    put_header(ws, 2, HEADERS)
+    widths = [20, 26, 58]
+    set_widths(ws, widths)
+    put_title(ws, 1, "门诊早矫管理指标地图（IOMI · 早矫体检）", 3, sum(widths))
+    put_header(ws, 2, ["指标", "行业参考标准 / 取值", "说明"], widths)
 
     r = 3
-    put_row(ws, r, ["四个维度", "各 6 题，满分 18", "维度分 = 该维度 6 题之和 ÷ 18 × 100；总分 = 四维之和 ÷ 72 × 100"],
-            fill=FILL_NEUTRAL)
-    r += 1
-    for d, ids in (("A", "A1–A6"), ("B", "B1–B6"), ("C", "C1–C6"), ("D", "D1–D6")):
-        put_row(ws, r, [f"{DIM_NAME[d]}", ids, DIM_WHAT[d]], fill=DIM_FILL[d])
-        r += 1
+    write_row(ws, r, ["四个维度", "各 6 题，满分 18",
+                      "维度分 = 该维度 6 题之和 ÷ 18 × 100；总分 = 四维之和 ÷ 72 × 100"],
+              widths, fill=FILL_NEUTRAL, bold_cols=(1,)); r += 1
+    for d in "ABCD":
+        write_row(ws, r, [f"{d} · {DIM_NAME[d]}", f"{d}1–{d}6", DIM_WHAT[d]],
+                  widths, fill=DIM_FILL[d], bold_cols=(1,)); r += 1
 
-    style_blank_row(ws, r, 3)
-    r += 1
-    put_row(ws, r, ["四档等级", "百分制区间", "这一档的样子"], fill=FILL_HEAD)
-    r += 1
+    blank_row(ws, r); r += 1
+    write_row(ws, r, ["四档等级", "百分制区间", "这一档的样子"], widths,
+              fill=FILL_HEAD, bold_cols=(1, 2, 3)); r += 1
     for lid, name, span, desc in LEVELS:
-        put_row(ws, r, [f"{lid} {name}", span, desc], fill=FILL_NEUTRAL)
-        r += 1
+        write_row(ws, r, [f"{lid} {name}", span, desc], widths,
+                  fill=FILL_NEUTRAL, bold_cols=(1,)); r += 1
 
-    style_blank_row(ws, r, 3)
-    r += 1
-    put_row(ws, r, ["红线封顶", "命中 1 条", "等级封顶到 L2；总分栏仍显示原分（分是画像，等级是判断）"], fill=FILL_C)
-    r += 1
-    put_row(ws, r, ["", "命中 2 条及以上", "等级封顶到 L1"], fill=FILL_C)
-    r += 1
-    put_row(ws, r, ["", "未命中", "等级不受影响；报告写明「四条红线一条没碰」"], fill=FILL_C)
+    blank_row(ws, r); r += 1
+    write_row(ws, r, ["红线封顶", "命中 1 条 → L2", "命中两条及以上 → L1；封顶只改等级，总分栏仍显示原分"],
+              widths, fill=FILL_C, bold_cols=(1,)); r += 1
+    for rid, short, judge in (
+        ("R1", "底数不清", "A1 判 0 或 1 分"),
+        ("R2", "无周期标准", "A2 判 0 或 1 分，且答完 A2 拿不出可核延期数字"),
+        ("R3", "结束无人核", "B4 判 0 或 1 分（1 分档仍是口头确认）"),
+        ("R4", "提成一次性发", "D2 判 0 分"),
+    ):
+        write_row(ws, r, [f"{rid} {short}", "命中判据", judge], widths, fill=FILL_C); r += 1
 
-    style_blank_row(ws, r, 3)
-    r += 1
-    put_row(ws, r, ["怎么用这个表", "1 题 1 行",
-                    "每题的「行业参考标准」栏就是选项，从最完备排到「没有」；受访者选第几项即得对应分值"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "选项与分值映射",
-                    "选项 1→3 分；选项 2→2 分；选项 3→1 分；选项 4→0 分；选项 5「不知道 / 没想过」→0 分"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "不要给受访者看分数",
-                    "选项里不出现分值，否则他会去猜哪个分高，答案立刻失真"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "24 题必须答完",
-                    "缺一题不出报告；「不知道 / 没想过」是有效答案，判 0 分"], fill=FILL_NEUTRAL)
+    blank_row(ws, r); r += 1
+    write_row(ws, r, ["怎么用这个表", "1 题 1 行", "每题的「行业参考标准」栏就是选项，从最完备排到「没有」"],
+              widths, fill=FILL_NEUTRAL, bold_cols=(1,)); r += 1
+    write_row(ws, r, ["", "选项与分值映射",
+                      "选项 1 → 3 分；选项 2 → 2 分；选项 3 → 1 分；选项 4 → 0 分；"
+                      "选项 5「不知道 / 没想过」→ 0 分"], widths, fill=FILL_NEUTRAL); r += 1
+    write_row(ws, r, ["", "不要给受访者看分数",
+                      "选项里不出现分值，否则他会去猜哪个分高，答案立刻失真"], widths, fill=FILL_NEUTRAL); r += 1
+    write_row(ws, r, ["", "24 题必须答完",
+                      "缺一题不出报告；「不知道 / 没想过」是有效答案，判 0 分"], widths, fill=FILL_NEUTRAL); r += 1
+    write_row(ws, r, ["", "填答方式",
+                      "在每题的「选择」列填 1–5，右侧自动出分；维度表底部有小计与维度分"],
+              widths, fill=FILL_NEUTRAL); r += 1
 
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 25
     ws.freeze_panes = "A3"
 
 
+# --------------------------------------------------------------------------- #
+# 维度表
+# --------------------------------------------------------------------------- #
 def sheet_dimension(wb: Workbook, dim: str) -> None:
-    ws = wb.create_sheet(f"{dim} 维度")
-    set_widths(ws, [10, 40, 46, 52, 12, 12])
-    put_title(ws, 1, f"{DIM_NAME[dim]}　{DIM_WHAT[dim]}（6 题，满分 18）", 6)
-    put_header(ws, 2, ["题号", "题干", "选项（回复数字即可）", "判分锚点 / 红线提示", "实际选择", "得分"])
+    ws = wb.create_sheet(DIM_TITLE[dim])
+    widths = [8, 34, 44, 42, 9, 9]
+    set_widths(ws, widths)
+    put_title(ws, 1, f"{DIM_NAME[dim]}　{DIM_WHAT[dim]}（6 题，满分 18）", 6, sum(widths))
+    put_header(ws, 2, ["题号", "题干", "选项（回复数字即可）", "判分锚点 / 红线提示", "选择", "得分"], widths)
+
+    dv = DataValidation(type="list", formula1='"1,2,3,4,5"', allow_blank=True,
+                        showErrorMessage=True, errorTitle="只能填 1–5",
+                        error="1 最完备 … 4 没有，5 不知道 / 没想过")
+    ws.add_data_validation(dv)
 
     fill = DIM_FILL[dim]
     r = 3
     for qid, stem, options, anchor in QUESTIONS:
         if not qid.startswith(dim):
             continue
-        start = r
-        # 题干与截图放在首行，选项每行一条
-        ws.cell(r, 1, qid)
-        ws.cell(r, 2, stem)
-        ws.cell(r, 3, options[0])
-        ws.cell(r, 4, anchor)
-        for i, (col, val) in enumerate([(1, qid), (2, stem), (3, options[0]), (4, anchor)], start=1):
-            c = ws.cell(r, col)
-            c.font = KEY_FONT if col == 1 else BODY_FONT
-            c.border = BORDER
-            c.alignment = VALIGN_WRAP
-            c.fill = fill
-        for col in (5, 6):
-            c = ws.cell(r, col)
-            c.border = BORDER
-            c.font = BODY_FONT
-            c.alignment = CENTER
-            c.fill = FILL_ANSWER
+        opts = "\n".join(f"{i}. {o}" for i, o in enumerate(options, start=1))
+        score = f'=IF(E{r}="","",IF(E{r}=1,3,IF(E{r}=2,2,IF(E{r}=3,1,0))))'
+        write_row(ws, r, [qid, stem, opts, anchor, None, score], widths,
+                  fill=fill, center_cols=(1, 5, 6), bold_cols=(1,), input_cols=(5,))
+        dv.add(ws.cell(r, 5))
         r += 1
-        for opt in options[1:]:
-            ws.cell(r, 3, opt)
-            for col in range(1, 7):
-                c = ws.cell(r, col)
-                c.border = BORDER
-                c.font = BODY_FONT
-                c.alignment = VALIGN_WRAP
-                c.fill = fill if col <= 4 else FILL_ANSWER
-                if col == 6 and r == start + 4:
-                    c.value = f"=IF(E{r}=\"\",\"\",IF(E{r}=1,3,IF(E{r}=2,2,IF(E{r}=3,1,0))))"
-                    c.alignment = CENTER
-            r += 1
-        ws.merge_cells(start_row=start, start_column=5, end_row=r - 1, end_column=5)
-        ws.cell(start, 5).alignment = CENTER
-        ws.merge_cells(start_row=start, start_column=6, end_row=r - 1, end_column=6)
-        ws.cell(start, 6).alignment = CENTER
-        ws.row_dimensions[start].height = 30
 
+    first, last = 3, r - 1
     r += 1
-    put_row(ws, r, ["小计", f"{dim} 维度得分合计", "", "", "", f"=SUM(F3:F{r-2})"], fill=FILL_TOTAL)
+    write_row(ws, r, ["小计", f"{dim} 维度合计（满分 18）", "", "", "", f"=SUM(F{first}:F{last})"],
+              widths, fill=FILL_TOTAL, center_cols=(1, 5, 6), bold_cols=(1, 2, 6))
+    sub_row = r
     r += 1
-    put_row(ws, r, ["", f"{dim} 维度分（百分制）", "= 合计 ÷ 18 × 100", "", "",
-                    f"=ROUND(F{r-1}/18*100,0)"], fill=FILL_TOTAL)
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 25
+    write_row(ws, r, ["维度分", f"{dim} 维度分（百分制）", "= 合计 ÷ 18 × 100", "", "",
+                      f"=ROUND(F{sub_row}/18*100,0)"],
+              widths, fill=FILL_TOTAL, center_cols=(1, 5, 6), bold_cols=(1, 2, 6))
     ws.freeze_panes = "C3"
-
-
-def sheet_redlines(wb: Workbook) -> None:
-    ws = wb.create_sheet("红线封顶")
-    set_widths(ws, [18, 40, 46, 40, 12])
-    put_title(ws, 1, "四条红线：命中即封顶（先于任何得分看）", 5)
-    put_header(ws, 2, ["红线", "命中判据（一句话）", "按题号分档直接判", "为什么它是红线", "实际结论"])
-    r = 3
-    for rid, short, judge, why in REDLINES:
-        put_row(ws, r, [rid, short, judge, why, None], fill=FILL_C, answer_from=5)
-        r += 1
-    style_blank_row(ws, r, 5)
-    r += 1
-    for text, val in (("命中 1 条 → 等级封顶", "L2"),
-                      ("命中 2 条及以上 → 等级封顶", "L1"),
-                      ("封顶只改等级，不改总分", "总分栏显示原分"),
-                      ("红线只有两种结论", "命中 / 未命中（没有「信息不足」）")):
-        put_row(ws, r, [text, "", "", "", val], fill=FILL_NEUTRAL)
-        r += 1
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 25
-    ws.freeze_panes = "A3"
-
-
-def sheet_actions(wb: Workbook) -> None:
-    ws = wb.create_sheet("改进动作与路线")
-    set_widths(ws, [10, 24, 24, 8, 66])
-    put_title(ws, 1, "六个改进动作与 90 天路线图（只输出命中的动作）", 5)
-    put_header(ws, 2, ["动作", "名称", "覆盖题号", "档位", "落地要点"])
-    r = 3
-    for aid, name, ids, tier, how in ACTIONS:
-        put_row(ws, r, [aid, name, ids, tier, how], fill=FILL_B if tier == "P0" else FILL_NEUTRAL)
-        r += 1
-    r += 1
-    put_row(ws, r, ["入选规则", "覆盖题号均分 < 2", "或覆盖题号里出现任何一个 0 分", "",
-                    "两条满足任一条就输出给用户；两条都不满足就不写"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["排序规则", "档位优先", "P0（挂红线且两周内能落地）→ P1（其余挂红线）→ P2（不挂红线）", "",
-                    "同档按缺口大小排"], fill=FILL_NEUTRAL)
-
-    style_blank_row(ws, r, 5)
-    r += 1
-    put_row(ws, r, ["90 天路线图", "第 1–2 周", "摸底数与终点定义", "",
-                    "在册病例底数表 + 终点定义口径 → 在册数与超期数能随口报出"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "第 3–6 周", "立标准与分级", "",
-                    "分级表 + 审核表 + 阶段目标模板 → 至少 3 个新病例走完流程并留下记录"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "第 7–10 周", "建记录与复核", "",
-                    "四张报表 + 结束复核表 → 报表数据与病历记录能对上"], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "第 11–13 周", "调钱和账", "",
-                    "薪酬调整规则 + 三张财务表 + 5 张损益卡 → 能回答单例赚不赚钱"], fill=FILL_NEUTRAL)
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 25
-    ws.freeze_panes = "A3"
-
-
-def sheet_metrics(wb: Workbook) -> None:
-    ws = wb.create_sheet("八个关键指标")
-    set_widths(ws, [8, 40, 24, 56, 14, 14])
-    put_title(ws, 1, "八个关键指标（报告必填，未知就写未知并给出取证方式）", 6)
-    put_header(ws, 2, ["编号", "指标", "从哪题来", "数据从哪取 / 口径提示", "数值", "是否未知"])
-    r = 3
-    for kid, name, src, how in METRICS:
-        put_row(ws, r, [kid, name, src, how, None, None], fill=FILL_D, answer_from=5)
-        r += 1
-    style_blank_row(ws, r, 6)
-    r += 1
-    put_row(ws, r, ["口径", "未知即结论",
-                    "任何指标答不出", "不估算、不用行业均值顶替；写「未知」并写明哪张报表、哪个字段能查出来",
-                    "", ""], fill=FILL_NEUTRAL)
-    r += 1
-    put_row(ws, r, ["", "不替代专业意见",
-                    "收入确认 / 提成 / 预收款",
-                    "涉及法律与会计准则，请咨询会计与法务", "", ""], fill=FILL_NEUTRAL)
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 25
-    ws.freeze_panes = "A3"
-
-
-def sheet_input(wb: Workbook) -> None:
-    """一页填答表：把 24 题压成一列选项号，方便快速录入。"""
-    ws = wb.create_sheet("填答表")
-    set_widths(ws, [8, 12, 58, 10, 10])
-    put_title(ws, 1, "填答表：每题填 1–5（1 最完备 … 4 没有，5 不知道 / 没想过）", 5)
-    put_header(ws, 2, ["维度", "题号", "题干", "选项号", "得分"])
-    r = 3
-    for qid, stem, _opts, _anchor in QUESTIONS:
-        dim = qid[0]
-        put_row(ws, r, [DIM_NAME[dim], qid, stem, None,
-                        f'=IF(D{r}="","",IF(D{r}=1,3,IF(D{r}=2,2,IF(D{r}=3,1,0))))'],
-                fill=DIM_FILL[dim], answer_from=4)
-        ws.cell(r, 3).alignment = VALIGN_WRAP
-        r += 1
-    # 维度小计
-    r += 1
-    for dim in "ABCD":
-        put_row(ws, r, [DIM_NAME[dim], f"{dim} 小计", "", "",
-                        f'=SUMPRODUCT((LEFT($B$3:$B$26,1)="{dim}")*$E$3:$E$26)'], fill=FILL_TOTAL)
-        r += 1
-    put_row(ws, r, ["总分", "四维合计 / 72", "", "", f"=SUM(E{r-4}:E{r-1})"], fill=FILL_TOTAL)
-    r += 1
-    put_row(ws, r, ["总分（百分制）", "合计 ÷ 72 × 100", "", "", f"=ROUND(E{r-1}/72*100,0)"], fill=FILL_TOTAL)
-    r += 1
-    put_row(ws, r, ["等级", "对照区间", "0–30 L1 无标准 / 31–55 L2 刚起步 / 56–80 L3 有体系 / 81–100 L4 能自转", "",
-                    f'=IF(E{r-1}<=30,"L1 无标准",IF(E{r-1}<=55,"L2 刚起步",IF(E{r-1}<=80,"L3 有体系","L4 能自转")))'],
-            fill=FILL_TOTAL)
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 25
-    ws.freeze_panes = "A3"
 
 
 def main() -> int:
@@ -554,15 +438,10 @@ def main() -> int:
     out = sys.argv[1]
 
     wb = Workbook()
-    wb.remove(wb.active)  # 去掉默认 Sheet
-
+    wb.remove(wb.active)
     sheet_overview(wb)
     for dim in "ABCD":
         sheet_dimension(wb, dim)
-    sheet_redlines(wb)
-    sheet_actions(wb)
-    sheet_metrics(wb)
-    sheet_input(wb)
 
     wb.save(out)
     print(f"已生成 {out}")
