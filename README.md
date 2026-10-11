@@ -101,6 +101,7 @@ git clone https://github.com/gaogao94/interceptive-ortho-management-index.git \
 | [`tools/html_to_image.mjs`](tools/html_to_image.mjs) | HTML → PNG：先测真实内容高度再截图，避免底部留大片空白；默认 CSS 视口 990px / 2 倍图 |
 | [`tools/check_writing_style.py`](tools/check_writing_style.py) | 报告的文案自检（冒号提示语、序数小标题、空话开头等 10 类可机检问题） |
 | [`tools/check_ste_allowlist.py`](tools/check_ste_allowlist.py) | STE 警告的允许清单校验：只接受两类已知可接受项（大字行被当段落、原话里的词），其余判失败 |
+| [`tools/build_metrics_workbook.py`](tools/build_metrics_workbook.py) | 把整套内容导出成一张《门诊早矫管理指标地图》Excel：总览 + 四张维度表 + 红线 + 动作 + 指标 + 可填答并自动算分的填答表 |
 
 ### HTML 报告依赖
 
@@ -224,6 +225,35 @@ python tools/render_report.py report.json --png --am "$AM_CLI"
 | K8 | 单例就诊次单价（收入 ÷ 就诊次数） | D6（分母来自 C3） |
 
 **未知即结论**：任何一个指标你答不出来，报告不会估一个数糊过去，而是写"未知"并告诉你哪张报表、哪个字段能查出来。指标不是为了好看，是为了让"拖得越久越不赚钱"从感觉变成算式。
+
+---
+
+## 可选：导出成 Excel（指标地图 / 填答表）
+
+```bash
+python tools/build_metrics_workbook.py 门诊早矫管理指标地图.xlsx
+```
+
+产出 9 张表，版式对齐常见的口腔经营指标地图（标题行 + 三栏分组 + 分组色块 + 细边框）：
+
+| 工作表 | 内容 |
+|---|---|
+| 指标地图总览 | 四个维度 / 四档等级 / 红线封顶规则 / 用法与分值映射 |
+| A–D 维度 | 每题一行：题号、题干、五个选项、判分锚点与红线提示；右侧留「实际选择 / 得分」两列 |
+| 红线封顶 | 四条红线的判据、为什么是红线、封顶规则 |
+| 改进动作与路线 | 六个动作、覆盖题号、档位、落地要点 + 90 天路线图 |
+| 八个关键指标 | K1–K8 的取数来源与口径提示 |
+| 填答表 | 24 题压成一列：填选项号 1–5，自动算逐题得分、维度小计、总分、百分制、等级 |
+
+**填答表是真算的**：维度小计用 `SUMPRODUCT` 按题号首字母分组，总分、百分制、等级都是公式。
+公式用 LibreOffice 重算引擎验过，与康桥样例报告（维度 33/28/39/17、总分 29、L1 无标准）
+逐项一致：
+
+```bash
+python tools/test_metrics_workbook.py 门诊早矫管理指标地图.xlsx
+```
+
+导出物**不随仓库分发**（`.gitignore` 忽略 `*.xlsx`）：它是一次性产物，脚本才是源头。
 
 ---
 
